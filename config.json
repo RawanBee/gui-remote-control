@@ -1,0 +1,11 @@
+{
+  "camera_index": 0,
+  "num_hands": 1,
+  "pointer_smoothing": 0.35,
+  "mirror_camera_x": true,
+  "pinch_distance_threshold": 0.05,
+  "click_hold_ms": 220,
+  "click_cooldown_ms": 350,
+  "scroll_sensitivity": 1.0,
+  "dead_zone_fraction": 0.08
+}
