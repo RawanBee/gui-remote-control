@@ -1,11 +1,25 @@
-# Gesture Mouse (v1 scaffold)
+# Gesture Mouse
 
-Cross-platform (macOS + Windows) Python app: webcam → MediaPipe Hand Landmarker → gestures → system input (PyAutoGUI). **Phase 1** only opens the camera, draws landmarks, and shows `hand detected` / `no hand`. Cursor control comes in Phase 2.
+Webcam → **MediaPipe Hand Landmarker** → on-screen preview with **gesture-driven** mouse control (macOS + Windows) via **PyAutoGUI**. No extra hardware—just a hand in the camera frame.
+
+## What it does
+
+| Gesture | Action |
+|--------|--------|
+| Index tip | Move cursor (mapped + smoothed; optional dead zone) |
+| Thumb–index pinch | **Left** click on release (hold timing aligns with right by default) or **drag** if held longer |
+| Thumb–middle pinch (index not pinching index) | **Right** click on release |
+| Index + middle up, ring + pinky down | **Scroll** (vertical) |
+| HUD / preview | Landmarks, status, pinch “lock” / hold / drag rings |
+
+Hotkeys: **Space** toggles control, **Esc** turns control off, **q** quits.
+
+Tuning lives in **`config.json`** (thresholds, smoothing, scroll gain, optional `left_pinch_lock_cursor`, etc.).
 
 ## Setup
 
-1. Python **3.11 or 3.12** recommended (newer versions may work, but wheels differ by OS).
-2. Create a venv and install deps:
+1. Python **3.11 or 3.12** recommended.
+2. Venv + dependencies:
 
 ```bash
 python3 -m venv .venv
@@ -23,25 +37,34 @@ This writes `model/hand_landmarker.task`.
 
 ## Run
 
-The first import of `mediapipe` may spend a short time building **matplotlib**’s font cache; later starts are faster.
-
 ```bash
 python app.py
 ```
 
-- **Space**: toggle `control_enabled` flag (shown in HUD; no mouse yet in Phase 1).
-- **Esc**: force control off.
-- **q**: quit.
+The first `mediapipe` import may build matplotlib’s font cache once; later starts are faster.
 
-## Permissions
+## Permissions (OS)
 
-- **macOS**: Camera + Accessibility (for later phases when PyAutoGUI moves the cursor).
-- **Windows**: allow camera access for desktop apps.
+- **macOS**: Camera + **Accessibility** (required for PyAutoGUI to move the pointer).
+- **Windows**: Allow camera access for desktop apps.
 
 ## Layout
 
-See `src/` modules: `camera`, `hand_tracker`, `overlay`, `state`, `hotkeys`, plus placeholders for `gesture_engine`, `cursor_mapper`, `input_controller`, `smoothing`.
+| Path | Role |
+|------|------|
+| `app.py` | Main loop: camera, gestures, pointer, HUD |
+| `config.json` | Thresholds and tuning |
+| `src/gesture_engine.py` | Pinch / scroll / timing state machines |
+| `src/input_controller.py` | Pointer, clicks, drag, scroll |
+| `src/cursor_mapper.py` | Normalized tip → screen (dead zone, mirror) |
+| `src/hand_tracker.py` | MediaPipe wrapper |
+| `src/overlay.py` | Landmarks + interaction rings |
+| `src/state.py` | Shared runtime state |
+
+## License
+
+This repository is **proprietary**. See [`LICENSE`](LICENSE). **No use, copying, modification, distribution, or sublicensing is allowed without prior written permission from the copyright holder.**
 
 ## Packaging (later)
 
-Build with PyInstaller **on each OS separately** once gestures are stable.
+Build with **PyInstaller on each OS separately** once gesture defaults are stable.
