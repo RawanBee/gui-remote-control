@@ -64,6 +64,19 @@ def scroll_gesture_active(
     return True
 
 
+def right_click_pose_active(
+    landmarks,
+    *,
+    min_middle_tip_above_index_y: float = 0.0,
+) -> bool:
+    """
+    Right-click pose: index finger extended up.
+    Low-motion gating is applied in the main loop to require a steady hold.
+    """
+    _ = min_middle_tip_above_index_y
+    return finger_extended_up(landmarks, 8, 6)
+
+
 class PinchApproachFreeze:
     """
     Loose enter (fingers coming together) / wider exit hysteresis.
@@ -106,28 +119,33 @@ class PinchApproachFreeze:
 @dataclass
 class PinchDragFrameResult:
     pinch_active: bool
+    pinch_just_started: bool
+    pinch_just_ended: bool
     pinch_hold_ready: bool
     drag_active: bool
     drag_just_started: bool
     drag_just_ended: bool
-    click_on_release: bool
+    click_fired: bool
 
 
 class PinchDragClickProcessor:
     """
-    Left: release pinch after ``click_hold_ms``–``drag_start_ms`` → click;
-    hold past ``drag_start_ms`` → drag until release.
+    Left:
+    - hold pinch past ``click_hold_ms`` and while still below ``drag_start_ms`` -> one click
+    - hold past ``drag_start_ms`` -> drag until release
     """
 
     def __init__(self) -> None:
         self._was_pinching = False
         self._pinch_t0: float | None = None
         self._dragging = False
+        self._click_fired_this_pinch = False
 
     def reset(self) -> None:
         self._was_pinching = False
         self._pinch_t0 = None
         self._dragging = False
+        self._click_fired_this_pinch = False
 
     def update(
         self,
@@ -158,27 +176,40 @@ class PinchDragClickProcessor:
 
         drag_just_started = False
         drag_just_ended = False
-        click_on_release = False
+        click_fired = False
+        pinch_just_started = False
+        pinch_just_ended = False
 
         if pinch_active and not self._was_pinching:
+            pinch_just_started = True
             self._pinch_t0 = now
+            self._click_fired_this_pinch = False
 
         if not pinch_active and self._was_pinching:
+            pinch_just_ended = True
             t0 = self._pinch_t0 if self._pinch_t0 is not None else now
             held_ms = (now - t0) * 1000.0
             if self._dragging:
                 self._dragging = False
                 drag_just_ended = True
-            elif held_ms >= click_hold_eff and held_ms < drag_start:
-                cooldown_ok = last_click_time <= 0.0 or (now - last_click_time) >= cooldown_s
-                if cooldown_ok:
-                    click_on_release = True
+            _ = held_ms
             self._pinch_t0 = None
+            self._click_fired_this_pinch = False
 
         pinch_hold_ready = False
         if pinch_active and self._pinch_t0 is not None:
             held_ms = (now - self._pinch_t0) * 1000.0
             pinch_hold_ready = held_ms >= click_hold_eff
+            if (
+                not self._dragging
+                and not self._click_fired_this_pinch
+                and held_ms >= click_hold_eff
+                and held_ms < drag_start
+            ):
+                cooldown_ok = last_click_time <= 0.0 or (now - last_click_time) >= cooldown_s
+                if cooldown_ok:
+                    click_fired = True
+                    self._click_fired_this_pinch = True
             if not self._dragging and held_ms >= drag_start:
                 self._dragging = True
                 drag_just_started = True
@@ -186,76 +217,75 @@ class PinchDragClickProcessor:
         self._was_pinching = pinch_active
         return PinchDragFrameResult(
             pinch_active=pinch_active,
+            pinch_just_started=pinch_just_started,
+            pinch_just_ended=pinch_just_ended,
             pinch_hold_ready=pinch_hold_ready,
             drag_active=self._dragging,
             drag_just_started=drag_just_started,
             drag_just_ended=drag_just_ended,
-            click_on_release=click_on_release,
+            click_fired=click_fired,
         )
 
 
 @dataclass
-class SimpleReleaseClickResult:
-    pinch_active: bool
-    pinch_hold_ready: bool
-    click_on_release: bool
+class PoseHoldClickResult:
+    pose_active: bool
+    pose_just_started: bool
+    pose_hold_ready: bool
+    click_fired: bool
 
 
-class PinchReleaseClickOnly:
-    """Thumb–middle (or any pair) pinch: click on release after min hold; no drag."""
+class PoseHoldClickOnly:
+    """Single click when a pose is held long enough and cooldown allows it."""
 
     def __init__(self) -> None:
-        self._was_pinching = False
-        self._pinch_t0: float | None = None
+        self._was_active = False
+        self._t0: float | None = None
+        self._click_fired = False
 
     def reset(self) -> None:
-        self._was_pinching = False
-        self._pinch_t0 = None
+        self._was_active = False
+        self._t0 = None
+        self._click_fired = False
 
     def update(
         self,
-        distance: float,
+        pose_active: bool,
         *,
-        threshold: float,
-        pinch_open_scale: float,
         hold_ms: float,
         cooldown_ms: float,
         now: float,
         last_click_time: float,
-    ) -> SimpleReleaseClickResult:
-        thr_close = max(1e-6, float(threshold))
-        thr_open = thr_close * max(1.02, float(pinch_open_scale))
-        if not self._was_pinching:
-            pinch_active = distance < thr_close
-        else:
-            pinch_active = distance < thr_open
-
+    ) -> PoseHoldClickResult:
         hold = max(0.0, float(hold_ms))
         cooldown_s = max(0.0, float(cooldown_ms)) / 1000.0
-        click_on_release = False
+        click_fired = False
+        pose_just_started = False
 
-        if pinch_active and not self._was_pinching:
-            self._pinch_t0 = now
+        if pose_active and not self._was_active:
+            pose_just_started = True
+            self._t0 = now
+            self._click_fired = False
 
-        pinch_hold_ready = False
-        if pinch_active and self._pinch_t0 is not None:
-            held_ms = (now - self._pinch_t0) * 1000.0
-            pinch_hold_ready = held_ms >= hold
-
-        if not pinch_active and self._was_pinching:
-            t0 = self._pinch_t0 if self._pinch_t0 is not None else now
-            held_ms = (now - t0) * 1000.0
-            if held_ms >= hold:
+        pose_hold_ready = False
+        if pose_active and self._t0 is not None:
+            held_ms = (now - self._t0) * 1000.0
+            pose_hold_ready = held_ms >= hold
+            if pose_hold_ready and not self._click_fired:
                 ok = last_click_time <= 0.0 or (now - last_click_time) >= cooldown_s
                 if ok:
-                    click_on_release = True
-            self._pinch_t0 = None
+                    click_fired = True
+                    self._click_fired = True
+        if not pose_active:
+            self._t0 = None
+            self._click_fired = False
 
-        self._was_pinching = pinch_active
-        return SimpleReleaseClickResult(
-            pinch_active=pinch_active,
-            pinch_hold_ready=pinch_hold_ready,
-            click_on_release=click_on_release,
+        self._was_active = pose_active
+        return PoseHoldClickResult(
+            pose_active=pose_active,
+            pose_just_started=pose_just_started,
+            pose_hold_ready=pose_hold_ready,
+            click_fired=click_fired,
         )
 
 

@@ -7,9 +7,9 @@ Webcam → **MediaPipe Hand Landmarker** → on-screen preview with **gesture-dr
 | Gesture | Action |
 |--------|--------|
 | Index tip | Move cursor (mapped + smoothed; optional dead zone) |
-| Thumb–index pinch | **Left** click on release (hold timing aligns with right by default) or **drag** if held longer |
-| Thumb–middle pinch (index not pinching index) | **Right** click on release |
-| Index + middle up, ring + pinky down | **Scroll** (vertical) |
+| Thumb–index pinch | **Left** click on hold (no release required) or **drag** if held longer |
+| Index finger up (held steady) | **Right** click |
+| Index + middle up, ring + pinky down (move vertically) | **Scroll** (vertical) |
 | HUD / preview | Landmarks, status, pinch “lock” / hold / drag rings |
 
 Hotkeys: **Space** toggles control, **Esc** turns control off, **q** quits.

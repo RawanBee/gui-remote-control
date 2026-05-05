@@ -16,12 +16,12 @@ from src.cursor_mapper import index_tip_to_screen
 from src.gesture_engine import (
     PinchApproachFreeze,
     PinchDragClickProcessor,
-    PinchReleaseClickOnly,
+    PoseHoldClickOnly,
     TwoFingerScrollTracker,
     index_pointer_extended,
+    right_click_pose_active,
     scroll_gesture_active,
     thumb_index_distance,
-    thumb_middle_distance,
 )
 from src.hand_tracker import HandTracker
 from src.hotkeys import interpret_preview_key
@@ -78,7 +78,7 @@ def main() -> int:
     pinch_drag = PinchDragClickProcessor()
     pinch_freeze = PinchApproachFreeze()
     right_pinch_freeze = PinchApproachFreeze()
-    right_click = PinchReleaseClickOnly()
+    right_click = PoseHoldClickOnly()
     scroll_track = TwoFingerScrollTracker()
     window = "Gesture Mouse"
     prev_mono = time.monotonic()
@@ -102,7 +102,14 @@ def main() -> int:
     click_hold_slop_ms = float(cfg.get("click_hold_slop_ms", 0.0))
     click_cooldown_ms = float(cfg.get("click_cooldown_ms", right_cooldown_ms))
     drag_start_ms = float(cfg.get("drag_start_ms", 420))
-    right_index_clear = float(cfg.get("right_pinch_index_clear_scale", 1.12))
+    right_click_pose_hold_ms = float(cfg.get("right_click_pose_hold_ms", right_hold_ms))
+    right_click_pose_motion_deadzone = float(
+        cfg.get(
+            "right_click_index_motion_deadzone",
+            cfg.get("right_click_pose_motion_deadzone", 0.0016),
+        )
+    )
+    click_stability_pixels = float(cfg.get("click_stability_pixels", 6.0))
     pixel_deadzone = float(cfg.get("cursor_pixel_deadzone", 2.0))
     left_pinch_lock_cursor = bool(cfg.get("left_pinch_lock_cursor", False))
     flash_seconds = float(cfg.get("feedback_flash_seconds", 0.22))
@@ -110,6 +117,7 @@ def main() -> int:
     scroll_base = float(cfg.get("scroll_base_scale", 220))
     scroll_cap = int(cfg.get("scroll_max_clicks_per_frame", 2))
     scroll_dz = float(cfg.get("scroll_deadzone_y", 0.0011))
+    scroll_mode_motion_deadzone = float(cfg.get("scroll_mode_motion_deadzone", 0.0022))
     scroll_smooth = float(cfg.get("scroll_motion_smoothing", 0.78))
     scroll_invert = bool(cfg.get("scroll_invert_y", True))
     scroll_pinch_margin = float(cfg.get("scroll_pinch_margin", 1.15))
@@ -154,13 +162,26 @@ def main() -> int:
             if hand_detected and state.control_enabled:
                 lms = result.hand_landmarks[0]
                 dist_l = thumb_index_distance(lms)
-                dist_r = thumb_middle_distance(lms)
-                scroll_active = scroll_gesture_active(
+                pose_right = right_click_pose_active(lms)
+                mid_y = 0.5 * (float(lms[8].y) + float(lms[12].y))
+                index_y = float(lms[8].y)
+                dy_for_mode = (
+                    0.0 if state.last_hand_y is None else index_y - float(state.last_hand_y)
+                )
+                abs_dy_for_mode = abs(dy_for_mode)
+                right_pose_stationary = abs(dy_for_mode) <= right_click_pose_motion_deadzone
+                state.last_hand_y = index_y
+                scroll_pose_active = scroll_gesture_active(
                     lms,
                     dist_l,
                     pinch_thr,
                     scroll_pinch_margin,
                     min_middle_tip_above_index_y=scroll_middle_above,
+                )
+                # The same 2-finger hand shape can mean either right-click or scroll.
+                # Disambiguate by motion: stationary pose => right click, moving pose => scroll.
+                scroll_active = bool(
+                    scroll_pose_active and abs_dy_for_mode >= scroll_mode_motion_deadzone
                 )
 
                 if scroll_active and not prev_scroll_active:
@@ -201,7 +222,7 @@ def main() -> int:
                             drag_active=pr.drag_active,
                         )
 
-                    if pr.click_on_release or pr.drag_just_ended:
+                    if pr.pinch_just_ended or pr.drag_just_ended:
                         _clear_pointer_lock(state, pinch_freeze, right_pinch_freeze)
                         freeze_on = False
                         right_freeze_on = False
@@ -225,37 +246,27 @@ def main() -> int:
                         else:
                             hint_extra = "left: pinch…"
                     else:
-                        dist_for_right = (
-                            dist_r if dist_l > pinch_thr * right_index_clear else 99.0
-                        )
                         rr = right_click.update(
-                            dist_for_right,
-                            threshold=pinch_thr,
-                            pinch_open_scale=pinch_release_scale,
-                            hold_ms=right_hold_ms,
+                            pose_right and right_pose_stationary,
+                            hold_ms=right_click_pose_hold_ms,
                             cooldown_ms=right_cooldown_ms,
                             now=now_mono,
                             last_click_time=state.last_right_click_time,
                         )
-                        right_freeze_on, right_freeze_started, _ = right_pinch_freeze.update(
-                            dist_for_right,
-                            enter_max=fe_enter_r,
-                            exit_max=fe_exit_r,
-                            drag_active=False,
-                        )
-                        if rr.pinch_active:
-                            state.last_gesture = "right pinch"
-                            hint_extra = "right: locked on middle — release (cyan/magenta)"
+                        right_freeze_on = bool(rr.pose_active)
+                        right_freeze_started = bool(rr.pose_just_started)
+                        if rr.pose_active:
+                            state.last_gesture = "right index-hold"
+                            hint_extra = "right: hold index finger steady"
                         else:
                             state.last_gesture = "move"
                             hint_extra = (
-                                f"L: pinch {int(click_hold_ms)}–{int(drag_start_ms)} ms | "
-                                f"R: thumb–middle | scroll: 2 up, ring/pinky down"
+                                f"L: hold {int(click_hold_ms)} ms for click, {int(drag_start_ms)} ms drag | "
+                                "R: steady index hold | scroll: 2 up + vertical motion"
                             )
                 else:
                     state.scroll_mode = True
                     state.last_gesture = "scroll"
-                    mid_y = 0.5 * (float(lms[8].y) + float(lms[12].y))
                     clicks = scroll_track.scroll_delta(
                         mid_y,
                         sensitivity=scroll_sens,
@@ -286,6 +297,7 @@ def main() -> int:
                     and not drag_follow
                     and (
                         right_freeze_on
+                        or pr.pinch_active
                         or (freeze_on and left_pinch_lock_cursor)
                     )
                 )
@@ -367,7 +379,7 @@ def main() -> int:
                             not scroll_active and right_freeze_on and not drag_follow
                         ),
                         middle_right_hold_ready=bool(
-                            rr and rr.pinch_hold_ready and right_freeze_on
+                            rr and rr.pose_hold_ready and right_freeze_on
                         ),
                         left_button_down=bool(pr and pr.drag_active),
                         feedback_flash_tip=state.feedback_flash_tip,
@@ -381,7 +393,24 @@ def main() -> int:
                         input_controller.mouse_up_left()
                     if pr.drag_just_started:
                         input_controller.mouse_down_left()
-                    if pr.click_on_release:
+                    if pr.click_fired:
+                        stable = True
+                        if (
+                            cx is not None
+                            and cy is not None
+                            and state.last_cursor_x is not None
+                            and state.last_cursor_y is not None
+                        ):
+                            stable = (
+                                math.hypot(
+                                    float(state.last_cursor_x) - float(cx),
+                                    float(state.last_cursor_y) - float(cy),
+                                )
+                                <= click_stability_pixels
+                            )
+                        if not stable:
+                            pr.click_fired = False
+                    if pr.click_fired:
                         if cx is not None and cy is not None:
                             input_controller.click_left_at(
                                 int(round(cx)), int(round(cy))
@@ -397,7 +426,7 @@ def main() -> int:
                     and state.control_enabled
                     and not scroll_active
                     and rr is not None
-                    and rr.click_on_release
+                    and rr.click_fired
                 ):
                     cx = state.last_sent_cursor_x
                     cy = state.last_sent_cursor_y
@@ -421,6 +450,7 @@ def main() -> int:
             else:
                 prev_scroll_active = False
                 state.scroll_mode = False
+                state.last_hand_y = None
                 scroll_track.reset()
                 pinch_drag.reset()
                 right_click.reset()
@@ -459,6 +489,7 @@ def main() -> int:
                 state.control_enabled = not state.control_enabled
                 if not state.control_enabled:
                     prev_scroll_active = False
+                    state.last_hand_y = None
                     scroll_track.reset()
                     pinch_drag.reset()
                     right_click.reset()
@@ -472,6 +503,7 @@ def main() -> int:
             if action.disable_control:
                 state.control_enabled = False
                 prev_scroll_active = False
+                state.last_hand_y = None
                 scroll_track.reset()
                 pinch_drag.reset()
                 right_click.reset()
