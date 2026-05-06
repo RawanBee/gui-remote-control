@@ -20,6 +20,16 @@ def thumb_middle_distance(landmarks) -> float:
     return math.hypot(t.x - m.x, t.y - m.y)
 
 
+def hand_scale(landmarks) -> float:
+    """
+    Approximate hand size in normalized image space.
+    Uses wrist (0) -> middle MCP (9) distance as a stable scale proxy.
+    """
+    w = landmarks[0]
+    m = landmarks[9]
+    return math.hypot(w.x - m.x, w.y - m.y)
+
+
 def finger_extended_up(landmarks, tip_idx: int, pip_idx: int, margin: float = 0.0) -> bool:
     """Tip above PIP in image (smaller y), roughly finger pointing up in frame."""
     return float(landmarks[tip_idx].y) + margin < float(landmarks[pip_idx].y)

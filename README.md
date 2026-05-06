@@ -61,6 +61,11 @@ python app.py --config config.demo.json
 
 Demo HUD always shows a gesture cheat-sheet so viewers can follow along.
 
+If calibration is enabled, onboarding is explicit:
+- Press `c` to start calibration
+- Hold an open, steady hand until progress reaches 100%
+- Press `Enter` to confirm (or `c` to recalibrate)
+
 ## Permissions (OS)
 
 - **macOS**: Camera + **Accessibility** (required for PyAutoGUI to move the pointer).

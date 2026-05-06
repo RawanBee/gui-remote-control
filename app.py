@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import math
+import statistics
 import sys
 import time
 from pathlib import Path
@@ -19,6 +20,7 @@ from src.gesture_engine import (
     PinchDragClickProcessor,
     PoseHoldClickOnly,
     TwoFingerScrollTracker,
+    hand_scale,
     index_pointer_extended,
     right_click_pose_active,
     scroll_gesture_active,
@@ -136,7 +138,6 @@ def main() -> int:
     pinch_release_scale = float(cfg.get("pinch_release_scale", 1.52))
     freeze_enter_scale = float(cfg.get("pinch_freeze_enter_scale", 1.48))
     freeze_exit_scale = float(cfg.get("pinch_freeze_exit_scale", 1.12))
-    right_freeze_scale = float(cfg.get("right_pinch_freeze_scale", 1.32))
     right_hold_ms = float(cfg.get("right_click_hold_ms", 120))
     right_cooldown_ms = float(cfg.get("right_click_cooldown_ms", 300))
     # Left pinch uses the same minimum hold and cooldown as right unless overridden.
@@ -164,6 +165,12 @@ def main() -> int:
     scroll_invert = bool(cfg.get("scroll_invert_y", True))
     scroll_pinch_margin = float(cfg.get("scroll_pinch_margin", 1.15))
     scroll_middle_above = float(cfg.get("scroll_min_middle_tip_above_index_y", 0.0))
+    calibration_enabled = bool(cfg.get("calibration_enabled", True))
+    calibration_frames = int(cfg.get("calibration_frames", 90))
+    calibration_min_open_multiplier = float(cfg.get("calibration_min_open_multiplier", 1.25))
+    adaptive_thresholds = bool(cfg.get("adaptive_thresholds", True))
+    adaptive_min_scale = float(cfg.get("adaptive_min_scale", 0.75))
+    adaptive_max_scale = float(cfg.get("adaptive_max_scale", 1.35))
     preview_width = int(cfg.get("preview_width", 360))
     preview_height = int(cfg.get("preview_height", 220))
     preview_width_percent = float(cfg.get("preview_width_percent", 0.0))
@@ -177,8 +184,11 @@ def main() -> int:
 
     fe_enter = pinch_thr * freeze_enter_scale
     fe_exit = fe_enter * freeze_exit_scale
-    fe_enter_r = fe_enter * right_freeze_scale
-    fe_exit_r = fe_exit * right_freeze_scale
+    calibrated_pinch_thr = pinch_thr
+    ref_hand_scale: float | None = None
+    calib_hand_scales: list[float] = []
+    calib_open_dists: list[float] = []
+    calib_state = "ready" if not calibration_enabled else "awaiting_start"
 
     cv2.namedWindow(window, cv2.WINDOW_NORMAL)
     init_w, init_h = max(180, preview_width), max(120, preview_height)
@@ -230,10 +240,62 @@ def main() -> int:
 
             screen_w, screen_h = input_controller.screen_size()
             hint_extra = ""
+            onboarding_line = ""
+            calibration_progress: float | None = None
 
-            if hand_detected and state.control_enabled:
+            if calibration_enabled and calib_state != "ready":
+                state.control_enabled = False
+                state.last_gesture = "calibrating"
+                needed = max(15, calibration_frames)
+                if calib_state == "awaiting_start":
+                    onboarding_line = "calibration: press C to start"
+                elif calib_state == "collecting":
+                    if hand_detected:
+                        lms0 = result.hand_landmarks[0]
+                        hs0 = hand_scale(lms0)
+                        dist0 = thumb_index_distance(lms0)
+                        if hs0 > 1e-6:
+                            calib_hand_scales.append(float(hs0))
+                        if dist0 > pinch_thr * max(1.05, calibration_min_open_multiplier):
+                            calib_open_dists.append(float(dist0))
+                    calibration_progress = min(1.0, len(calib_hand_scales) / float(needed))
+                    if len(calib_hand_scales) >= needed:
+                        ref_hand_scale = float(statistics.median(calib_hand_scales))
+                        if calib_open_dists:
+                            open_med = float(statistics.median(calib_open_dists))
+                            calibrated_pinch_thr = max(0.02, min(0.10, open_med * 0.40))
+                        else:
+                            calibrated_pinch_thr = pinch_thr
+                        calib_state = "confirm"
+                        calibration_progress = 1.0
+                        onboarding_line = (
+                            f"calibration done: thr={calibrated_pinch_thr:.3f} (Enter confirm / C redo)"
+                        )
+                    else:
+                        if hand_detected:
+                            onboarding_line = (
+                                f"calibrating... {int(round(100*calibration_progress))}% keep hand open/steady"
+                            )
+                        else:
+                            onboarding_line = "calibrating... show your hand to camera"
+                elif calib_state == "confirm":
+                    calibration_progress = 1.0
+                    onboarding_line = (
+                        f"calibration ready: thr={calibrated_pinch_thr:.3f} (Enter confirm / C redo)"
+                    )
+
+            if hand_detected and state.control_enabled and calib_state == "ready":
                 lms = result.hand_landmarks[0]
                 dist_l = thumb_index_distance(lms)
+                hs = hand_scale(lms)
+
+                pinch_thr_live = calibrated_pinch_thr
+                if adaptive_thresholds and ref_hand_scale and hs > 1e-6:
+                    ratio = float(hs) / float(ref_hand_scale)
+                    ratio = max(adaptive_min_scale, min(adaptive_max_scale, ratio))
+                    pinch_thr_live = calibrated_pinch_thr * ratio
+                fe_enter_live = pinch_thr_live * freeze_enter_scale
+                fe_exit_live = fe_enter_live * freeze_exit_scale
                 pose_right = right_click_pose_active(lms)
                 mid_y = 0.5 * (float(lms[8].y) + float(lms[12].y))
                 index_y = float(lms[8].y)
@@ -246,7 +308,7 @@ def main() -> int:
                 scroll_pose_active = scroll_gesture_active(
                     lms,
                     dist_l,
-                    pinch_thr,
+                    pinch_thr_live,
                     scroll_pinch_margin,
                     min_middle_tip_above_index_y=scroll_middle_above,
                 )
@@ -267,7 +329,7 @@ def main() -> int:
                     right_freeze_on = False
                     pr = pinch_drag.update(
                         dist_l,
-                        threshold=pinch_thr,
+                        threshold=pinch_thr_live,
                         pinch_open_scale=pinch_release_scale,
                         click_hold_ms=click_hold_ms,
                         click_hold_slop_ms=click_hold_slop_ms,
@@ -289,8 +351,8 @@ def main() -> int:
                     else:
                         freeze_on, freeze_started, _ = pinch_freeze.update(
                             dist_l,
-                            enter_max=fe_enter,
-                            exit_max=fe_exit,
+                            enter_max=fe_enter_live,
+                            exit_max=fe_exit_live,
                             drag_active=pr.drag_active,
                         )
 
@@ -351,7 +413,7 @@ def main() -> int:
                     input_controller.scroll_vertical(clicks)
                     hint_extra = "scroll: index+middle up, ring+pinky down, move vertically"
 
-                open_rough = pinch_thr * max(1.25, pinch_release_scale) * 1.02
+                open_rough = pinch_thr_live * max(1.25, pinch_release_scale) * 1.02
                 in_left_pinch_rough = dist_l < open_rough
                 thumb_index_tracked = pr is not None and (pr.pinch_active or pr.drag_active)
                 pointer_ok = (
@@ -560,15 +622,21 @@ def main() -> int:
             )
 
             min_hud_h = max(90, hud_height)
-            ui_lines = [
-                f"{'hand' if hand_detected else 'no hand'} | fps {fps_smooth:4.1f} | control {'ON' if state.control_enabled else 'OFF'}",
-                f"gesture: {state.last_gesture}",
-                (
+            if calibration_enabled and calib_state != "ready":
+                help_line = onboarding_line or "calibration pending"
+                key_line = "c start/restart | enter confirm | q quit"
+            else:
+                help_line = (
                     hint_extra
                     if hint_extra and (hand_detected and state.control_enabled)
                     else "move:index | left:pinch hold | right:index hold | scroll:2-finger move"
-                ),
-                "space toggle | esc off | q quit",
+                )
+                key_line = "space toggle | esc off | q quit"
+            ui_lines = [
+                f"{'hand' if hand_detected else 'no hand'} | fps {fps_smooth:4.1f} | control {'ON' if state.control_enabled else 'OFF'}",
+                f"gesture: {state.last_gesture}",
+                help_line,
+                key_line,
             ]
 
             font_face = cv2.FONT_HERSHEY_SIMPLEX
@@ -605,6 +673,30 @@ def main() -> int:
                     lineType=cv2.LINE_AA,
                 )
                 y += line_step
+
+            if calibration_progress is not None:
+                bar_x = pad_x
+                bar_y = max(pad_y, target_hud_h - 16)
+                bar_w = max(80, target_w - (2 * pad_x))
+                bar_h = 8
+                cv2.rectangle(
+                    hud_frame,
+                    (bar_x, bar_y),
+                    (bar_x + bar_w, bar_y + bar_h),
+                    (80, 80, 80),
+                    1,
+                    lineType=cv2.LINE_AA,
+                )
+                fill_w = int(round((bar_w - 2) * max(0.0, min(1.0, calibration_progress))))
+                if fill_w > 0:
+                    cv2.rectangle(
+                        hud_frame,
+                        (bar_x + 1, bar_y + 1),
+                        (bar_x + 1 + fill_w, bar_y + bar_h - 1),
+                        (80, 210, 120),
+                        -1,
+                        lineType=cv2.LINE_AA,
+                    )
 
             gap_px = max(0, hud_gap)
             if gap_px > 0:
@@ -657,7 +749,29 @@ def main() -> int:
             action = interpret_preview_key(key)
             if action.quit_app:
                 break
+            if action.start_calibration and calibration_enabled:
+                calib_state = "collecting"
+                calib_hand_scales.clear()
+                calib_open_dists.clear()
+                state.control_enabled = False
+                prev_scroll_active = False
+                state.last_hand_y = None
+                scroll_track.reset()
+                pinch_drag.reset()
+                right_click.reset()
+                _clear_pointer_lock(state, pinch_freeze, right_pinch_freeze)
+                _safe_end_drag(state)
+                state.last_cursor_x = None
+                state.last_cursor_y = None
+                state.last_sent_cursor_x = None
+                state.last_sent_cursor_y = None
+                state.feedback_flash_tip = None
+            if action.confirm_calibration and calibration_enabled and calib_state == "confirm":
+                calib_state = "ready"
+                state.last_gesture = "idle"
             if action.toggle_control:
+                if calibration_enabled and calib_state != "ready":
+                    continue
                 state.control_enabled = not state.control_enabled
                 if not state.control_enabled:
                     prev_scroll_active = False
