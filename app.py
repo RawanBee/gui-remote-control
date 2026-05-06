@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 
 import cv2
+import numpy as np
 
 from src.camera import Camera
 from src.cursor_mapper import index_tip_to_screen
@@ -26,7 +27,7 @@ from src.gesture_engine import (
 from src.hand_tracker import HandTracker
 from src.hotkeys import interpret_preview_key
 from src import input_controller
-from src.overlay import draw_hand_interaction_feedback, draw_hand_landmarks, draw_status
+from src.overlay import draw_hand_interaction_feedback, draw_hand_landmarks
 from src.smoothing import smooth_pointer
 from src.state import AppState
 
@@ -34,6 +35,43 @@ from src.state import AppState
 def _load_config(path: Path) -> dict:
     with path.open("r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def _resolve_config_path(root: Path, argv: list[str]) -> Path:
+    """Resolve config path from CLI (`--config PATH`) or default to config.json."""
+    cfg_path = root / "config.json"
+    if "--config" not in argv:
+        return cfg_path
+    i = argv.index("--config")
+    if i + 1 >= len(argv):
+        raise ValueError("--config requires a file path")
+    raw = Path(argv[i + 1]).expanduser()
+    return raw if raw.is_absolute() else (root / raw)
+
+
+def _wrap_text_to_width(
+    text: str,
+    max_width_px: int,
+    *,
+    font_face: int = cv2.FONT_HERSHEY_SIMPLEX,
+    font_scale: float = 0.5,
+    thickness: int = 1,
+) -> list[str]:
+    words = text.split()
+    if not words:
+        return [""]
+    lines: list[str] = []
+    current = words[0]
+    for word in words[1:]:
+        trial = f"{current} {word}"
+        w, _ = cv2.getTextSize(trial, font_face, font_scale, thickness)[0]
+        if w <= max_width_px:
+            current = trial
+        else:
+            lines.append(current)
+            current = word
+    lines.append(current)
+    return lines
 
 
 def _safe_end_drag(state: AppState) -> None:
@@ -51,7 +89,11 @@ def _clear_pointer_lock(state: AppState, *freezes: PinchApproachFreeze) -> None:
 
 def main() -> int:
     root = Path(__file__).resolve().parent
-    cfg_path = root / "config.json"
+    try:
+        cfg_path = _resolve_config_path(root, sys.argv[1:])
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        return 2
     if not cfg_path.is_file():
         print(f"Missing {cfg_path}", file=sys.stderr)
         return 1
@@ -122,13 +164,43 @@ def main() -> int:
     scroll_invert = bool(cfg.get("scroll_invert_y", True))
     scroll_pinch_margin = float(cfg.get("scroll_pinch_margin", 1.15))
     scroll_middle_above = float(cfg.get("scroll_min_middle_tip_above_index_y", 0.0))
+    preview_width = int(cfg.get("preview_width", 360))
+    preview_height = int(cfg.get("preview_height", 220))
+    preview_width_percent = float(cfg.get("preview_width_percent", 0.0))
+    preview_size_percent = float(cfg.get("preview_size_percent", 0.0))
+    preview_margin = int(cfg.get("preview_margin", 20))
+    preview_anchor = str(cfg.get("preview_anchor", "bottom-left")).strip().lower()
+    preview_always_on_top = bool(cfg.get("preview_always_on_top", True))
+    preview_mirror = bool(cfg.get("preview_mirror", mirror_x))
+    hud_height = int(cfg.get("hud_height", 120))
+    hud_gap = int(cfg.get("hud_gap", 6))
 
     fe_enter = pinch_thr * freeze_enter_scale
     fe_exit = fe_enter * freeze_exit_scale
     fe_enter_r = fe_enter * right_freeze_scale
     fe_exit_r = fe_exit * right_freeze_scale
 
+    cv2.namedWindow(window, cv2.WINDOW_NORMAL)
+    init_w, init_h = max(180, preview_width), max(120, preview_height)
+    if preview_width_percent > 0.0:
+        sw0, _ = input_controller.screen_size()
+        p = max(0.05, min(0.95, preview_width_percent))
+        init_w = max(180, int(round(sw0 * p)))
+    elif preview_size_percent > 0.0:
+        sw0, sh0 = input_controller.screen_size()
+        p = max(0.05, min(0.95, preview_size_percent))
+        init_w = max(180, int(round(sw0 * p)))
+        init_h = max(120, int(round(sh0 * p)))
+    cv2.resizeWindow(window, init_w, init_h + max(90, hud_height) + max(0, hud_gap))
     try:
+        if preview_always_on_top:
+            cv2.setWindowProperty(window, cv2.WND_PROP_TOPMOST, 1)
+    except cv2.error:
+        pass
+
+    try:
+        outer_x = 0
+        outer_y = 0
         while True:
             ok, frame = cam.read()
             if not ok or frame is None:
@@ -469,18 +541,118 @@ def main() -> int:
                 inst_fps = 1.0 / dt
                 fps_smooth = inst_fps if fps_smooth == 0.0 else (0.9 * fps_smooth + 0.1 * inst_fps)
 
-            status_lines = [
-                "hand detected" if hand_detected else "no hand",
-                f"fps: {fps_smooth:4.1f}",
-                f"control: {'ON' if state.control_enabled else 'OFF'} (space toggles, esc off)",
-                f"gesture: {state.last_gesture}",
-            ]
-            if hint_extra and (hand_detected and state.control_enabled):
-                status_lines.append(hint_extra)
-            status_lines.append("q quit")
-            draw_status(frame, status_lines)
+            target_w = max(180, preview_width)
+            target_h = max(120, preview_height)
+            h_frame, w_frame = frame.shape[:2]
+            if preview_width_percent > 0.0:
+                p = max(0.05, min(0.95, preview_width_percent))
+                target_w = max(180, int(round(screen_w * p)))
+                target_h = max(120, int(round(target_w * (h_frame / max(1, w_frame)))))
+                cv2.resizeWindow(window, target_w, target_h)
+            elif preview_size_percent > 0.0:
+                p = max(0.05, min(0.95, preview_size_percent))
+                target_w = max(180, int(round(screen_w * p)))
+                target_h = max(120, int(round(screen_h * p)))
+                cv2.resizeWindow(window, target_w, target_h)
+            frame_for_preview = cv2.flip(frame, 1) if preview_mirror else frame
+            display_frame = cv2.resize(
+                frame_for_preview, (target_w, target_h), interpolation=cv2.INTER_AREA
+            )
 
-            cv2.imshow(window, frame)
+            min_hud_h = max(90, hud_height)
+            ui_lines = [
+                f"{'hand' if hand_detected else 'no hand'} | fps {fps_smooth:4.1f} | control {'ON' if state.control_enabled else 'OFF'}",
+                f"gesture: {state.last_gesture}",
+                (
+                    hint_extra
+                    if hint_extra and (hand_detected and state.control_enabled)
+                    else "move:index | left:pinch hold | right:index hold | scroll:2-finger move"
+                ),
+                "space toggle | esc off | q quit",
+            ]
+
+            font_face = cv2.FONT_HERSHEY_SIMPLEX
+            font_scale = 0.5
+            thickness = 1
+            line_step = 22
+            pad_x = 10
+            pad_y = 20
+            max_text_w = max(60, target_w - (2 * pad_x))
+            wrapped_lines: list[str] = []
+            for line in ui_lines:
+                wrapped_lines.extend(
+                    _wrap_text_to_width(
+                        line,
+                        max_text_w,
+                        font_face=font_face,
+                        font_scale=font_scale,
+                        thickness=thickness,
+                    )
+                )
+            target_hud_h = max(min_hud_h, pad_y + line_step * len(wrapped_lines) + 8)
+            hud_frame = np.full((target_hud_h, target_w, 3), 20, dtype=np.uint8)
+
+            y = pad_y
+            for text in wrapped_lines:
+                cv2.putText(
+                    hud_frame,
+                    text,
+                    (pad_x, y),
+                    font_face,
+                    font_scale,
+                    (240, 240, 240),
+                    thickness,
+                    lineType=cv2.LINE_AA,
+                )
+                y += line_step
+
+            gap_px = max(0, hud_gap)
+            if gap_px > 0:
+                spacer = np.full((gap_px, target_w, 3), 12, dtype=np.uint8)
+                combined = np.vstack((display_frame, spacer, hud_frame))
+            else:
+                combined = np.vstack((display_frame, hud_frame))
+
+            win_w = int(combined.shape[1])
+            win_h = int(combined.shape[0])
+            cv2.resizeWindow(window, win_w, win_h)
+            cv2.imshow(window, combined)
+            rect_x = rect_y = 0
+            try:
+                rect_x, rect_y, w, h = cv2.getWindowImageRect(window)
+                if w > 0 and h > 0:
+                    win_w, win_h = int(w), int(h)
+            except cv2.error:
+                pass
+
+            if preview_anchor == "bottom-left":
+                px = max(0, preview_margin)
+                py = max(0, screen_h - win_h - preview_margin)
+            elif preview_anchor == "top-left":
+                px = max(0, preview_margin)
+                py = max(0, preview_margin)
+            elif preview_anchor == "bottom-right":
+                px = max(0, screen_w - win_w - preview_margin)
+                py = max(0, screen_h - win_h - preview_margin)
+            elif preview_anchor == "top-right":
+                px = max(0, screen_w - win_w - preview_margin)
+                py = max(0, preview_margin)
+            else:
+                px = max(0, preview_margin)
+                py = max(0, screen_h - win_h - preview_margin)
+
+            # Correct for platform window chrome/title-bar offsets by nudging from
+            # the observed image-rect position instead of assuming outer==inner.
+            dx = int(px) - int(rect_x)
+            dy = int(py) - int(rect_y)
+            outer_x = int(max(0, outer_x + dx))
+            outer_y = int(max(0, outer_y + dy))
+            cv2.moveWindow(window, outer_x, outer_y)
+            try:
+                if preview_always_on_top:
+                    cv2.setWindowProperty(window, cv2.WND_PROP_TOPMOST, 1)
+            except cv2.error:
+                pass
             key = cv2.waitKey(1) & 0xFF
             action = interpret_preview_key(key)
             if action.quit_app:

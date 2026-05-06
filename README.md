@@ -16,6 +16,8 @@ Hotkeys: **Space** toggles control, **Esc** turns control off, **q** quits.
 
 Tuning lives in **`config.json`** (thresholds, smoothing, scroll gain, optional `left_pinch_lock_cursor`, etc.).
 
+Preview window placement is also configurable (`preview_width`, `preview_height`, `preview_width_percent`, `preview_size_percent`, `preview_margin`, `preview_anchor`, `preview_always_on_top`). Status text can be shown in a separate attached HUD window using `hud_height` and `hud_gap`.
+
 ## Setup
 
 1. Python **3.11 or 3.12** recommended.
@@ -42,6 +44,22 @@ python app.py
 ```
 
 The first `mediapipe` import may build matplotlib’s font cache once; later starts are faster.
+
+### Demo mode
+
+Use a safer pre-tuned profile for live demos:
+
+```bash
+bash scripts/run_demo.sh
+```
+
+Or run directly:
+
+```bash
+python app.py --config config.demo.json
+```
+
+Demo HUD always shows a gesture cheat-sheet so viewers can follow along.
 
 ## Permissions (OS)
 

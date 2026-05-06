@@ -32,5 +32,15 @@
   "scroll_invert_y": true,
   "scroll_pinch_margin": 1.15,
   "scroll_min_middle_tip_above_index_y": 0,
-  "dead_zone_fraction": 0.08
+  "dead_zone_fraction": 0.08,
+  "preview_width": 360,
+  "preview_height": 220,
+  "preview_width_percent": 0.2,
+  "preview_size_percent": 0.0,
+  "preview_margin": 0,
+  "preview_anchor": "bottom-left",
+  "preview_always_on_top": true,
+  "preview_mirror": true,
+  "hud_height": 120,
+  "hud_gap": 6
 }
